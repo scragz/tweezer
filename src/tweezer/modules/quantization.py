@@ -99,8 +99,11 @@ class Quantization(DSPModule):
                 sample = audio[i] + err * feedback
                 if dither_sig is not None:
                     sample += dither_sig[i]
-                q = np.round(sample / lsb) * lsb
-                q = np.clip(q, -1.0, 1.0 - lsb)
+                if lsb >= 1.0:
+                    # 1-bit: comparator semantics (square wave, no dead zone)
+                    q = 1.0 if sample >= 0 else -1.0
+                else:
+                    q = np.clip(np.round(sample / lsb) * lsb, -1.0, 1.0)
                 err = audio[i] - q
                 output[i] = q
         else:
@@ -108,7 +111,12 @@ class Quantization(DSPModule):
             inp = audio.copy()
             if dither_sig is not None:
                 inp = inp + dither_sig
-            output = np.round(inp / lsb_arr) * lsb_arr
-            output = np.clip(output, -1.0, 1.0 - lsb_arr)
+            # 1-bit special case: comparator (sign) to produce proper square wave
+            one_bit = lsb_arr >= 1.0
+            output = np.where(
+                one_bit,
+                np.where(inp >= 0, 1.0, -1.0),
+                np.clip(np.round(inp / np.where(one_bit, 1.0, lsb_arr)) * lsb_arr, -1.0, 1.0),
+            )
 
         return output

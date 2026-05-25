@@ -49,16 +49,12 @@ class MPC60(DSPModule):
                 sos = bessel(4, aa_cutoff, btype="low", output="sos", norm="phase")
             audio = sosfilt(sos, audio)
 
-        # Linear interpolation resampling (the sinc comb emerges from this inherently)
-        n_out = max(1, int(n / ratio))
-        src_positions = np.arange(n_out, dtype=float) * ratio
+        # Linear interpolation resampling (the sinc comb emerges from this inherently).
+        # ratio > 1: pitch down (advance slowly through source, loops for continuity).
+        # ratio < 1: pitch up (advance quickly, reading past source end wraps to start).
+        # Always outputs n samples so the full duration is preserved.
+        src_positions = (np.arange(n, dtype=float) / ratio) % n
         output = np.interp(src_positions, np.arange(n, dtype=float), audio)
-
-        # Trim or pad to original length
-        if len(output) >= n:
-            output = output[:n]
-        else:
-            output = np.pad(output, (0, n - len(output)))
 
         # Reconstruction lowpass
         if cutoff < 0.98:

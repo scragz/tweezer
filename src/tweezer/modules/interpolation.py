@@ -3,9 +3,13 @@ Three hardware resampling kernels with distinct artifact signatures:
   nn      — nearest-neighbor (SP-1200): staircase aliasing, no smoothing
   gaussian — 4-point Gaussian (PSX SPU): warm rolloff with pre-cutoff presence
   zigzag  — 25-point irregular FIR (PSX XA-ADPCM): angular steps, 22kHz noise floor
+
+All kernels simulate recording at a lower sample rate (sr/ratio) and playing back
+at the original rate. The full audio duration is always preserved — ratio controls
+fidelity/aliasing character, not pitch or length.
 """
 import numpy as np
-from scipy.signal import butter, bessel, sosfilt, lfilter, resample_poly
+from scipy.signal import butter, sosfilt, lfilter
 from .base import DSPModule, ParamSpec
 
 
@@ -28,6 +32,7 @@ _PSX_GAUSS = _build_psx_gaussian_table()
 
 
 def _gaussian_interp(audio: np.ndarray, ratio: float, n_out: int) -> np.ndarray:
+    """Downsample `audio` to `n_out` samples using PSX 4-point Gaussian weights."""
     n_in = len(audio)
     positions = np.arange(n_out, dtype=float) * ratio
     i_arr = positions.astype(int)
@@ -44,8 +49,7 @@ def _gaussian_interp(audio: np.ndarray, ratio: float, n_out: int) -> np.ndarray:
     w2 = _PSX_GAUSS[0x100 + idx_arr].astype(float)
     w3 = _PSX_GAUSS[idx_arr].astype(float)
 
-    out = (w0 * audio[i0] + w1 * audio[i1] + w2 * audio[i2] + w3 * audio[i3]) / 32768.0
-    return out
+    return (w0 * audio[i0] + w1 * audio[i1] + w2 * audio[i2] + w3 * audio[i3]) / 32768.0
 
 
 # ---------------------------------------------------------------------------
@@ -60,8 +64,17 @@ _ZIGZAG_COEFFS = np.array([
      0.179, 0.0,   -0.064, 0.0,    0.019, 0.0,   -0.004, 0.0,
      0.0,
 ], dtype=float)
-# Renormalize so DC gain ≈ 1
-_ZIGZAG_COEFFS /= _ZIGZAG_COEFFS.sum() if _ZIGZAG_COEFFS.sum() != 0 else 1.0
+_ZIGZAG_COEFFS /= _ZIGZAG_COEFFS.sum()
+
+
+def _nn_upsample(audio: np.ndarray, n_out: int) -> np.ndarray:
+    """Nearest-neighbor upsample — each input sample repeats to fill n_out."""
+    n_in = len(audio)
+    indices = np.clip(
+        np.round(np.arange(n_out, dtype=float) * n_in / n_out).astype(int),
+        0, n_in - 1,
+    )
+    return audio[indices]
 
 
 class Interpolation(DSPModule):
@@ -76,7 +89,7 @@ class Interpolation(DSPModule):
         ),
         "ratio": ParamSpec(
             float, 1.0, (0.063, 16.0),
-            "Resample ratio (>1 = downsample/pitch down, <1 = upsample/pitch up)",
+            "Sample rate reduction factor: 1.69=SP-1200 (26kHz), 4.0=11kHz aliasing",
         ),
         "prefilter": ParamSpec(
             bool, False, None, "Apply anti-alias lowpass before downsampling"
@@ -93,41 +106,44 @@ class Interpolation(DSPModule):
         postfilter = self.params["postfilter"]
         n = len(audio)
 
-        # Anti-alias before downsampling
-        if prefilter and ratio > 1.0:
+        if ratio <= 1.0:
+            # ratio <= 1: upsample (higher fidelity than source) — minimal effect
+            return audio.copy()
+
+        # Optional pre-filter (band-limits before decimation, reduces aliasing)
+        src = audio
+        if prefilter:
             cutoff = min(0.95, 1.0 / ratio)
             sos = butter(4, cutoff, btype="low", output="sos")
-            audio = sosfilt(sos, audio)
+            src = sosfilt(sos, src)
 
-        n_out = max(1, int(n / ratio))
+        # Step 1 — Downsample to n_down = n / ratio samples using the kernel
+        n_down = max(2, int(n / ratio))
 
         if kernel == "nn":
-            indices = np.clip(
-                np.floor(np.arange(n_out, dtype=float) * ratio).astype(int), 0, n - 1
+            # Nearest-neighbor: skip samples (staircase aliasing, no smoothing)
+            dn_indices = np.clip(
+                np.floor(np.arange(n_down, dtype=float) * ratio).astype(int), 0, n - 1
             )
-            output = audio[indices].astype(float)
+            downsampled = src[dn_indices].astype(float)
 
         elif kernel == "gaussian":
-            output = _gaussian_interp(audio, ratio, n_out)
+            # PSX 4-point Gaussian: smooth Gaussian-weighted downsample
+            downsampled = _gaussian_interp(src, ratio, n_down)
 
         else:  # zigzag
-            # Resample to n_out via linear interp first, then apply zigzag FIR
-            linear = np.interp(
-                np.arange(n_out, dtype=float) * ratio,
-                np.arange(n, dtype=float),
-                audio,
-            )
-            output = lfilter(_ZIGZAG_COEFFS, [1.0], linear)
+            # Linearly decimate to n_down, then apply zigzag FIR character
+            positions = np.arange(n_down, dtype=float) * ratio
+            linear = np.interp(positions, np.arange(n, dtype=float), src)
+            downsampled = lfilter(_ZIGZAG_COEFFS, [1.0], linear)
 
-        # Trim or zero-pad to original length
-        if len(output) >= n:
-            output = output[:n]
-        else:
-            output = np.pad(output, (0, n - len(output)))
+        # Step 2 — NN upsample back to n (sample-repeat = staircase waveform)
+        # This is the authentic low-sample-rate playback artifact.
+        output = _nn_upsample(downsampled, n)
 
         # SSM2044-style Butterworth post-filter (SP-1200 ladder character)
         if postfilter:
-            cutoff = min(0.95, 1.0 / max(ratio, 1.0))
+            cutoff = min(0.95, 1.0 / ratio)
             sos = butter(4, cutoff, btype="low", output="sos")
             output = sosfilt(sos, output)
 

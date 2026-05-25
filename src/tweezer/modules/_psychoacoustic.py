@@ -160,7 +160,8 @@ def apply_masking_artifacts(
         phases = np.angle(frames[i])
         mag_db = 20 * np.log10(magnitudes + 1e-10)
         smr = mag_db - thresholds[i]
-        effective_smr = smr - (bitrate_pressure * 20)
+        # Multiplier of 6: pressure=1→6dB shift (moderate), 2.5→15dB (aggressive), 5→30dB (extreme)
+        effective_smr = smr - (bitrate_pressure * 6)
 
         below = effective_smr < 0
         depth = np.where(below, -effective_smr, 0.0)
@@ -199,7 +200,9 @@ def lpc_analysis(frame: np.ndarray, order: int = 10):
         return np.zeros(order), frame.copy()
     try:
         coeffs = solve_toeplitz(r[:order], r[1 : order + 1])
-    except np.linalg.LinAlgError:
+    except (np.linalg.LinAlgError, ValueError):
+        return np.zeros(order), frame.copy()
+    if not np.all(np.isfinite(coeffs)):
         return np.zeros(order), frame.copy()
     residual = np.zeros_like(frame)
     for n in range(order, len(frame)):
@@ -213,7 +216,9 @@ def lpc_synthesis(coeffs: np.ndarray, excitation: np.ndarray) -> np.ndarray:
     output = np.zeros_like(excitation)
     for n in range(order, len(excitation)):
         prediction = np.dot(coeffs, output[n - order : n][::-1])
-        output[n] = excitation[n] + prediction
+        val = excitation[n] + prediction
+        # Clamp runaway synthesis (unstable LPC filter on pathological input)
+        output[n] = val if abs(val) < 10.0 else np.sign(val) * 10.0
     return output
 
 

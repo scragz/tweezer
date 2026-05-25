@@ -77,19 +77,15 @@ class Truncation(DSPModule):
 
         # Post-filter
         if post_filter == "ladder":
-            # 4-pole Butterworth approximating SSM2044 ladder character
-            sos = butter(4, min(0.9, 1.0 / max(block_size / sr * sr / 1000, 1)), btype="low", output="sos")
-            # Simpler: fixed lowpass at ~8kHz to soften the transients
+            # Fixed lowpass at ~8kHz approximates SSM2044 ladder character
             sos = butter(4, min(0.9, 8000 / (sr / 2)), btype="low", output="sos")
             output = sosfilt(sos, output)
 
         elif post_filter == "resonant":
-            # Tuned bandpass — clicks ring at a specific frequency
-            # Center frequency tracks block rate
+            # Tuned bandpass — clicks ring at a frequency tied to block rate
             center_hz = min(sr / 2 * 0.9, sr / block_size * 2)
-            center_norm = min(0.99, center_hz / (sr / 2))
-            q = 8.0
-            b_coeff, a_coeff = iirpeak(center_norm, q / center_norm if center_norm > 0 else q)
+            center_norm = min(0.99, max(0.01, center_hz / (sr / 2)))
+            b_coeff, a_coeff = iirpeak(center_norm, 8.0)
             output = lfilter(b_coeff, a_coeff, output)
 
         return output

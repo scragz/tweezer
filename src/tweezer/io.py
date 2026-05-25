@@ -12,6 +12,7 @@ def read_audio(path: str, mono: bool = False) -> tuple[np.ndarray, int]:
 
 
 def write_audio(path: str, audio: np.ndarray, sr: int):
+    audio = np.nan_to_num(audio, nan=0.0, posinf=1.0, neginf=-1.0)
     audio = np.clip(audio, -1.0, 1.0)
     ext = Path(path).suffix.lower()
     subtype = {".wav": "PCM_24", ".flac": "PCM_24", ".aiff": "PCM_24", ".aif": "PCM_24"}.get(
